@@ -1,24 +1,16 @@
 const std = @import("std");
+const root = @import("root.zig");
+
+extern "kernel32" fn GetModuleHandleA(lpModuleName: ?[*:0]const u8) callconv(.C) *opaque {};
 
 pub fn main() !void {
-    // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
-    // stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    const stdout_file = std.io.getStdOut().writer();
-    var bw = std.io.bufferedWriter(stdout_file);
-    const stdout = bw.writer();
+    const h_module1 = try root.getModuleHandle(allocator, "ntdll.dll");
+    const h_module2 = GetModuleHandleA("ntdll.dll");
 
-    try stdout.print("Run `zig build test` to run the tests.\n", .{});
-
-    try bw.flush(); // don't forget to flush!
-}
-
-test "simple test" {
-    var list = std.ArrayList(i32).init(std.testing.allocator);
-    defer list.deinit(); // try commenting this out and see if zig detects the memory leak!
-    try list.append(42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
+    std.debug.print("getModuleHandle: 0x{x}\n", .{@intFromPtr(h_module1)});
+    std.debug.print("GetModuleHandleA: 0x{x}\n", .{@intFromPtr(h_module2)});
 }
