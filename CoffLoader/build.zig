@@ -8,7 +8,13 @@ pub fn build(b: *std.Build) void {
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
     // for restricting supported target set are available.
-    const target = b.standardTargetOptions(.{});
+    const target = b.standardTargetOptions(.{
+        .default_target = .{
+            .os_tag = .windows,
+            .cpu_arch = .x86_64,
+            .abi = .msvc,
+        },
+    });
 
     // Standard optimization options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
@@ -19,7 +25,7 @@ pub fn build(b: *std.Build) void {
         .name = "CoffLoader",
         // In this case the main source file is merely a path, however, in more
         // complicated build scripts, this could be a generated file.
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("src/coff_loader.zig"),
         .target = target,
         .optimize = optimize,
     });
