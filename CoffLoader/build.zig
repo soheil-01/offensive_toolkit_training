@@ -12,7 +12,7 @@ pub fn build(b: *std.Build) void {
         .default_target = .{
             .os_tag = .windows,
             .cpu_arch = .x86_64,
-            .abi = .msvc,
+            .abi = .gnu,
         },
     });
 
@@ -20,6 +20,19 @@ pub fn build(b: *std.Build) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
+
+    const beacon_lib = b.addStaticLibrary(.{
+        .name = "beacon",
+        .optimize = optimize,
+        .target = target,
+    });
+    beacon_lib.addCSourceFile(
+        .{
+            .file = b.path("lib/External.c"),
+            .flags = &.{"-std=c99"},
+        },
+    );
+    beacon_lib.linkLibC();
 
     const lib = b.addStaticLibrary(.{
         .name = "CoffLoader",
@@ -29,6 +42,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    lib.addIncludePath(b.path("lib"));
+    lib.linkLibrary(beacon_lib);
 
     // This declares intent for the library to be installed into the standard
     // location when the user invokes the "install" step (the default step when
@@ -41,6 +56,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    exe.addIncludePath(b.path("lib"));
+    exe.linkLibrary(beacon_lib);
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default

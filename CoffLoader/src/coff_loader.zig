@@ -1,4 +1,7 @@
 const std = @import("std");
+const c = @cImport({
+    @cInclude("External.h");
+});
 
 const win = std.os.windows;
 
@@ -279,16 +282,28 @@ fn loadExternalFunction(self: *CoffLoader, symbol_name: []const u8) !?*anyopaque
 
     var parts = std.mem.split(u8, symbol_name[6..], "$");
     const module_name = parts.first();
-    const proc_name = parts.next().?;
 
-    const module_name_z = try self.allocator.dupeZ(u8, module_name);
-    defer self.allocator.free(module_name_z);
-    const proc_name_z = try self.allocator.dupeZ(u8, proc_name);
-    defer self.allocator.free(proc_name_z);
+    if (parts.next()) |proc_name| {
+        const module_name_z = try self.allocator.dupeZ(u8, module_name);
+        defer self.allocator.free(module_name_z);
+        const proc_name_z = try self.allocator.dupeZ(u8, proc_name);
+        defer self.allocator.free(proc_name_z);
 
-    const function_address = GetProcAddress(LoadLibraryA(module_name_z), proc_name_z);
+        const function_address = GetProcAddress(LoadLibraryA(module_name_z), proc_name_z);
 
-    return function_address;
+        return function_address;
+    }
+
+    // That's an internal beacon function
+    const function_name = module_name;
+    for (0..29) |i| {
+        const len = std.mem.indexOfSentinel(u8, 0, c.internalFunctions[i][0]);
+        if (std.mem.eql(u8, c.internalFunctions[i][0][0..len], function_name)) {
+            return c.internalFunctions[i][1];
+        }
+    }
+
+    return null;
 }
 
 fn executeCoffCode(self: *CoffLoader) !void {
