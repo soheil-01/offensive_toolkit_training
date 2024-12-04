@@ -20,19 +20,18 @@ const Symbol = extern struct {
     storage_class: StorageClass align(1),
     number_of_aux_symbols: u8 align(1),
 
-    fn getNameOffset(self: Symbol) ?u32 {
-        if (!std.mem.eql(u8, self.name[0..4], "\x00\x00\x00\x00")) return null;
+    fn getNameOffset(self: Symbol) u32 {
         const offset = std.mem.readInt(u32, self.name[4..8], .little);
         return offset;
     }
 
-    fn getName(self: *const Symbol, coff_loader: *const CoffLoader) []const u8 {
+    pub fn getName(self: *const Symbol, coff_loader: *const CoffLoader) []const u8 {
         if (!std.mem.eql(u8, self.name[0..4], "\x00\x00\x00\x00")) {
             const len = std.mem.indexOfScalar(u8, &self.name, @as(u8, 0)) orelse self.name.len;
             return self.name[0..len];
         }
 
-        const name_offset = self.getNameOffset().?;
+        const name_offset = self.getNameOffset();
         const string_table_offset = coff_loader.coff_file.ptr + coff_loader.coff_header.pointer_to_symbol_table + @sizeOf(Symbol) * coff_loader.coff_header.number_of_symbols;
         const name_ptr: [*:0]u8 = @ptrCast(string_table_offset + name_offset);
         const name_len = std.mem.indexOfSentinel(u8, 0, name_ptr);
@@ -54,6 +53,15 @@ const Symbol = extern struct {
     }
 };
 const ImageRelAmd64 = std.coff.ImageRelAmd64;
+const GotEntry = struct {
+    function_address: *anyopaque,
+    offset: usize,
+    symbol: *Symbol,
+};
+const BssEntry = struct {
+    offset: usize,
+    symbol: *Symbol,
+};
 
 extern "kernel32" fn LoadLibraryA(lpModuleName: ?[*:0]const u8) callconv(win.WINAPI) win.HMODULE;
 extern "kernel32" fn GetProcAddress(hModule: win.HMODULE, lpProcName: [*:0]const u8) callconv(win.WINAPI) win.FARPROC;
@@ -64,8 +72,10 @@ allocator: std.mem.Allocator,
 coff_file: []u8,
 coff_header: *CoffHeader,
 section_address_memory: []?[*]u8,
-got: std.ArrayList(u8),
-bss: std.ArrayList(u8),
+got_entries: std.ArrayList(GotEntry),
+bss_entries: std.ArrayList(BssEntry),
+got: ?[*]u8 = null,
+bss: ?[*]u8 = null,
 
 pub fn init(allocator: std.mem.Allocator, file_path: []const u8) !CoffLoader {
     const coff_file = try std.fs.cwd().readFileAlloc(allocator, file_path, std.math.maxInt(usize));
@@ -79,8 +89,8 @@ pub fn init(allocator: std.mem.Allocator, file_path: []const u8) !CoffLoader {
         .coff_file = coff_file,
         .coff_header = coff_header,
         .section_address_memory = section_address_memory,
-        .got = std.ArrayList(u8).init(allocator),
-        .bss = std.ArrayList(u8).init(allocator),
+        .got_entries = std.ArrayList(GotEntry).init(allocator),
+        .bss_entries = std.ArrayList(BssEntry).init(allocator),
     };
 }
 
@@ -88,8 +98,10 @@ pub fn deinit(self: CoffLoader) void {
     for (self.section_address_memory) |section| if (section != null) win.VirtualFree(section.?, 0, win.MEM_RELEASE);
     self.allocator.free(self.section_address_memory);
     self.allocator.free(self.coff_file);
-    self.got.deinit();
-    self.bss.deinit();
+    self.got_entries.deinit();
+    self.bss_entries.deinit();
+    if (self.got) |got| win.VirtualFree(got, 0, win.MEM_RELEASE);
+    if (self.bss) |bss| win.VirtualFree(bss, 0, win.MEM_RELEASE);
 }
 
 fn loadSectionsIntoMemory(self: *CoffLoader) !void {
@@ -111,6 +123,45 @@ fn loadSectionsIntoMemory(self: *CoffLoader) !void {
 
         self.section_address_memory[i] = section_data;
     }
+
+    var bss_offset: usize = 0;
+    for (0..self.coff_header.number_of_symbols) |i| {
+        const symbol: *Symbol = @ptrCast(self.coff_file.ptr + self.coff_header.pointer_to_symbol_table + i * @sizeOf(Symbol));
+        const symbol_name = symbol.getName(self);
+
+        if (symbol.storage_class == .EXTERNAL and symbol.section_number == .UNDEFINED) {
+            if (try self.loadExternalFunction(symbol_name)) |function_address| {
+                const offset = self.got_entries.items.len * @sizeOf(usize);
+
+                try self.got_entries.append(.{
+                    .function_address = function_address,
+                    .symbol = symbol,
+                    .offset = offset,
+                });
+            } else {
+                try self.bss_entries.append(.{ .symbol = symbol, .offset = bss_offset });
+                bss_offset += symbol.value;
+            }
+        }
+    }
+
+    if (self.got_entries.items.len > 0) {
+        self.got = @ptrCast(try win.VirtualAlloc(
+            null,
+            self.got_entries.items.len * @sizeOf(usize),
+            win.MEM_COMMIT | win.MEM_RESERVE | win.MEM_TOP_DOWN,
+            win.PAGE_READWRITE,
+        ));
+    }
+
+    if (bss_offset > 0) {
+        self.bss = @ptrCast(try win.VirtualAlloc(
+            null,
+            bss_offset,
+            win.MEM_COMMIT | win.MEM_RESERVE | win.MEM_TOP_DOWN,
+            win.PAGE_READWRITE,
+        ));
+    }
 }
 
 fn performRelocations(self: *CoffLoader) !void {
@@ -122,22 +173,40 @@ fn performRelocations(self: *CoffLoader) !void {
             const symbol: *Symbol = @ptrCast(self.coff_file.ptr + self.coff_header.pointer_to_symbol_table + relocation.symbol_table_index * @sizeOf(Symbol));
 
             const section_data = self.section_address_memory[i] orelse return error.SectionIsEmpty;
-            const symbol_name = symbol.getName(self);
             const symbol_ref_address = section_data + relocation.virtual_address;
 
             var bss_address: ?*anyopaque = null;
 
             // Process functions and uninitialized variables
             if (symbol.storage_class == .EXTERNAL and symbol.section_number == .UNDEFINED) {
-                const function_address = try self.loadExternalFunction(symbol_name);
+                var got_address: ?[*]u8 = null;
+                var function_address: ?*anyopaque = null;
+
+                for (self.got_entries.items) |got_entry| {
+                    if (got_entry.symbol == symbol) {
+                        got_address = self.got.? + got_entry.offset;
+                        function_address = got_entry.function_address;
+                        break;
+                    }
+                }
+
                 if (function_address != null and relocation.type == @intFromEnum(ImageRelAmd64.rel32)) {
-                    const relative_address: u32 = @intCast(@intFromPtr(function_address.?) - (@intFromPtr(symbol_ref_address) + 4));
+                    @memcpy(got_address.?, std.mem.asBytes(&function_address.?));
+
+                    const got_address_int: isize = @intCast(@intFromPtr(got_address.?));
+                    const symbol_ref_address_int: isize = @intCast(@intFromPtr(symbol_ref_address));
+
+                    const relative_address: u32 = @bitCast(@as(i32, @truncate(got_address_int - (symbol_ref_address_int + 4))));
+
                     @memcpy(symbol_ref_address, std.mem.asBytes(&relative_address));
                     continue;
                 } else {
-                    const bss_offset = self.bss.items.len;
-                    try self.bss.appendNTimes(0, symbol.value);
-                    bss_address = &self.bss.items[bss_offset];
+                    for (self.bss_entries.items) |bss_entry| {
+                        if (bss_entry.symbol == symbol) {
+                            bss_address = self.bss.? + bss_entry.offset;
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -157,11 +226,17 @@ fn performRelocations(self: *CoffLoader) !void {
                 .addr32nb => {
                     var symbol_def_address: u32 = 0;
                     if (bss_address != null) {
-                        symbol_def_address = @intCast(@intFromPtr(bss_address.?) - (@intFromPtr(symbol_ref_address) + 4));
+                        const bss_address_int: isize = @intCast(@intFromPtr(bss_address.?));
+                        const symbol_ref_address_int: isize = @intCast(@intFromPtr(symbol_ref_address));
+
+                        symbol_def_address = @bitCast(@as(i32, @truncate(bss_address_int - (symbol_ref_address_int + 4))));
                     } else {
                         const symbol_offset = symbol.getOffset(u32, symbol_ref_address);
 
-                        symbol_def_address = @intCast(@intFromPtr(self.section_address_memory[@intFromEnum(symbol.section_number) - 1]) - (@intFromPtr(symbol_ref_address) + 4));
+                        const symbol_section_address_int: isize = @intCast(@intFromPtr(self.section_address_memory[@intFromEnum(symbol.section_number) - 1]));
+                        const symbol_ref_address_int: isize = @intCast(@intFromPtr(symbol_ref_address));
+
+                        symbol_def_address = @bitCast(@as(i32, @truncate(symbol_section_address_int - (symbol_ref_address_int + 4))));
 
                         if (@as(u64, symbol_def_address) + @as(u64, symbol_offset) > std.math.maxInt(u32)) {
                             std.debug.print("Warning: Relocation overflow detected. Skipping this relocation.\n", .{});
@@ -169,27 +244,29 @@ fn performRelocations(self: *CoffLoader) !void {
                         }
 
                         symbol_def_address += symbol_offset;
-
-                        @memcpy(symbol_ref_address, std.mem.asBytes(&symbol_def_address));
                     }
+
+                    @memcpy(symbol_ref_address, std.mem.asBytes(&symbol_def_address));
                 },
                 .rel32, .rel32_1, .rel32_2, .rel32_3, .rel32_4, .rel32_5 => {
                     var symbol_def_address: u32 = 0;
                     if (bss_address != null) {
-                        symbol_def_address = @intCast(@intFromPtr(bss_address.?) - (relocation.type - 4) - (@intFromPtr(symbol_ref_address) + 4));
+                        const bss_address_int: isize = @intCast(@intFromPtr(bss_address.?));
+                        const symbol_ref_address_int: isize = @intCast(@intFromPtr(symbol_ref_address));
+
+                        symbol_def_address = @bitCast(@as(i32, @truncate(bss_address_int - (relocation.type - 4) - (symbol_ref_address_int + 4))));
                     } else {
                         const symbol_offset = symbol.getOffset(u32, symbol_ref_address);
-                        symbol_def_address = @intCast(@intFromPtr(self.section_address_memory[@intFromEnum(symbol.section_number) - 1]) - (relocation.type - 4) - (@intFromPtr(symbol_ref_address) + 4));
 
-                        if (@as(u64, symbol_def_address) + @as(u64, symbol_offset) > std.math.maxInt(u32)) {
-                            std.debug.print("Warning: Relocation overflow detected. Skipping this relocation.\n", .{});
-                            continue;
-                        }
+                        const symbol_section_address_int: isize = @intCast(@intFromPtr(self.section_address_memory[@intFromEnum(symbol.section_number) - 1]));
+                        const symbol_ref_address_int: isize = @intCast(@intFromPtr(symbol_ref_address));
 
-                        symbol_def_address += symbol_offset;
+                        symbol_def_address = @bitCast(@as(i32, @truncate(symbol_section_address_int - (relocation.type - 4) - (symbol_ref_address_int + 4))));
 
-                        @memcpy(symbol_ref_address, std.mem.asBytes(&symbol_def_address));
+                        symbol_def_address = @addWithOverflow(symbol_def_address, symbol_offset)[0];
                     }
+
+                    @memcpy(symbol_ref_address, std.mem.asBytes(&symbol_def_address));
                 },
                 else => return error.UnsupportedRelocationType,
             }
@@ -211,11 +288,7 @@ fn loadExternalFunction(self: *CoffLoader, symbol_name: []const u8) !?*anyopaque
 
     const function_address = GetProcAddress(LoadLibraryA(module_name_z), proc_name_z);
 
-    const got_offset = self.got.items.len;
-    try self.got.appendSlice(std.mem.asBytes(&function_address));
-    const entry_address = &self.got.items[got_offset];
-
-    return entry_address;
+    return function_address;
 }
 
 fn executeCoffCode(self: *CoffLoader) !void {
