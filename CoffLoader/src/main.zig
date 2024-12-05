@@ -10,9 +10,13 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     if (args.len < 2) return error.MissingFilePath;
+    if (args.len < 3) return error.MissingEntryPoint;
 
-    var coff_loader = try CoffLoader.init(allocator, args[1]);
+    const file_path = args[1];
+    const entry_point = args[2];
+
+    var coff_loader = try CoffLoader.init(allocator, file_path);
     defer coff_loader.deinit();
 
-    try coff_loader.load();
+    try coff_loader.load(entry_point);
 }

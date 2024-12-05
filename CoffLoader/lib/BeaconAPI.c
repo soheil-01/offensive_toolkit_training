@@ -1,4 +1,4 @@
-#include "External.h"
+#include "BeaconAPI.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>

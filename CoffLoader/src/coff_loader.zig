@@ -1,6 +1,6 @@
 const std = @import("std");
 const c = @cImport({
-    @cInclude("External.h");
+    @cInclude("BeaconAPI.h");
 });
 
 const win = std.os.windows;
@@ -130,9 +130,9 @@ fn loadSectionsIntoMemory(self: *CoffLoader) !void {
     var bss_offset: usize = 0;
     for (0..self.coff_header.number_of_symbols) |i| {
         const symbol: *Symbol = @ptrCast(self.coff_file.ptr + self.coff_header.pointer_to_symbol_table + i * @sizeOf(Symbol));
-        const symbol_name = symbol.getName(self);
 
         if (symbol.storage_class == .EXTERNAL and symbol.section_number == .UNDEFINED) {
+            const symbol_name = symbol.getName(self);
             if (try self.loadExternalFunction(symbol_name)) |function_address| {
                 const offset = self.got_entries.items.len * @sizeOf(usize);
 
@@ -306,20 +306,20 @@ fn loadExternalFunction(self: *CoffLoader, symbol_name: []const u8) !?*anyopaque
     return null;
 }
 
-fn executeCoffCode(self: *CoffLoader) !void {
+fn executeCoffCode(self: *CoffLoader, function_name: []const u8) !void {
     for (0..self.coff_header.number_of_symbols) |i| {
         const symbol: *Symbol = @ptrCast(self.coff_file.ptr + self.coff_header.pointer_to_symbol_table + i * @sizeOf(Symbol));
         const symbol_name = symbol.getName(self);
 
-        if (std.mem.eql(u8, symbol_name, "go")) {
+        if (std.mem.eql(u8, symbol_name, function_name)) {
             const function: *fn () void = @ptrCast(self.section_address_memory[@intFromEnum(symbol.section_number) - 1].? + symbol.value);
             function();
         }
     }
 }
 
-pub fn load(self: *CoffLoader) !void {
+pub fn load(self: *CoffLoader, entry_point: []const u8) !void {
     try self.loadSectionsIntoMemory();
     try self.performRelocations();
-    try self.executeCoffCode();
+    try self.executeCoffCode(entry_point);
 }
