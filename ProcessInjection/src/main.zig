@@ -120,7 +120,7 @@ pub fn main() !void {
         @bitCast(PAGE_EXECUTE_READ),
         null,
         0,
-    ) orelse return error.MapViewOfFile2Failed);
+    ) orelse return error.MapViewOfFile3Failed);
     defer _ = UnmapViewOfFile(remote_mapped_view);
 
     std.debug.print("remote mapped view: 0x{X}\n", .{@intFromPtr(remote_mapped_view)});
