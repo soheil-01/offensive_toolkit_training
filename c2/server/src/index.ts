@@ -13,7 +13,7 @@ interface Command {
   id: string;
   implantId: string;
   type: string;
-  payload: any;
+  payload?: any;
   status: CommandStatus;
   response?: any;
 }
@@ -107,13 +107,13 @@ const app = new Elysia()
     const token = await implantJWT.sign({ id });
 
     return {
-      sucess: true,
+      success: true,
       message: 'Implant created',
       token,
       implant: implants[id],
     };
   })
-  .post(
+  .get(
     '/implants/beacon',
     async ({
       store: { implants, commands },
@@ -207,7 +207,7 @@ const app = new Elysia()
       body: t.Object({
         implantId: t.String(),
         type: t.String(),
-        payload: t.Any(),
+        payload: t.Optional(t.Any()),
       }),
       isSignIn: true,
     },
