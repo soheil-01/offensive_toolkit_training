@@ -4,12 +4,12 @@ import { implantService } from './implant';
 import { userService } from './user';
 import { dbService, commandsInsertSchema } from './db';
 
-export const command = new Elysia()
+export const command = new Elysia({ prefix: '/commands' })
   .use(userService)
   .use(implantService)
   .use(dbService)
   .get(
-    '/commands',
+    '/',
     async ({ db }) => {
       const commands = await db.query.commands.findMany();
       return commands;
@@ -19,7 +19,7 @@ export const command = new Elysia()
     },
   )
   .get(
-    '/commands/:id',
+    '/:id',
     async ({ params: { id }, error, db }) => {
       const command = await db.query.commands.findFirst({
         where: (commands, { eq }) => eq(commands.id, id),
@@ -42,7 +42,7 @@ export const command = new Elysia()
     },
   )
   .post(
-    '/commands',
+    '/',
     async ({ error, body: { implantId, type, payload }, db, schema }) => {
       const implant = await db.query.implants.findFirst({
         where: (implants, { eq }) => eq(implants.id, implantId),
@@ -74,7 +74,7 @@ export const command = new Elysia()
     },
   )
   .post(
-    '/commands/:id/status',
+    '/:id/status',
     async ({
       params: { id: commandId },
       headers: { authorization },
