@@ -36,9 +36,9 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
-        .zig_dis_x86_64 = .{
-            .url = "git+https://github.com/kubkon/zig-dis-x86_64#48c399d7f9d879f46a69d4a06af3fa0699286ba5",
-            .hash = "zig_dis_x86_64-0.0.1-bnhOUXf6AwDf1MpMgHZImLwqhFbUp2Fl_MoxhtPEeo4N",
+        .capstone = .{
+            .url = "git+https://github.com/allyourcodebase/capstone.git#7995ce6709350dea01410b6a7567a4f944b76a51",
+            .hash = "capstone-5.0.1-tmNUgT1GAAClSwiDASHOhkcLbEJrCMbZjD1pXxDe8NVZ",
         },
     },
     .paths = .{

@@ -20,7 +20,10 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    const dis_x86_64 = b.dependency("zig_dis_x86_64", .{});
+    const capstone = b.dependency("capstone", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     // We will also create a module for our other entry point, 'main.zig'.
     const exe_mod = b.createModule(.{
@@ -39,7 +42,7 @@ pub fn build(b: *std.Build) void {
         .name = "SyscallUnhook",
         .root_module = exe_mod,
     });
-    exe.root_module.addImport("dis_x86_64", dis_x86_64.module("dis_x86_64"));
+    exe.linkLibrary(capstone.artifact("capstone"));
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
