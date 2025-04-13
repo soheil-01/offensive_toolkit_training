@@ -4,20 +4,25 @@ const c = @cImport({
 });
 const win = std.os.windows;
 
+const NtProtectVirtualMemoryFn = *const fn (processHandle: win.HANDLE, baseAddress: win.LPVOID, regionSize: *win.SIZE_T, newProtection: u32, oldProtection: *u32) callconv(win.WINAPI) win.NTSTATUS;
+
 const MEMORY_BASIC_INFORMATION = win.MEMORY_BASIC_INFORMATION;
 
 const GetModuleHandleW = win.kernel32.GetModuleHandleW;
 const GetProcAddress = win.kernel32.GetProcAddress;
 const VirtualQuery = win.kernel32.VirtualQuery;
-const VirtualProtect = win.VirtualProtect;
 
 pub fn main() !void {
     const h_ntdll = GetModuleHandleW(std.unicode.utf8ToUtf16LeStringLiteral("ntdll.dll")) orelse return error.FailedToLoadNtdll;
+    const nt_protect_virtual_memory = GetProcAddress(h_ntdll, "NtProtectVirtualMemory") orelse return error.FailedToLoadNtProtectVirtualMemory;
     const nt_allocate_virtual_memory = GetProcAddress(h_ntdll, "NtAllocateVirtualMemory") orelse return error.FailedToLoadNtAllocateVirtualMemory;
 
-    try unhook(@ptrCast(nt_allocate_virtual_memory));
+    const NtProtectVirtualMemory: NtProtectVirtualMemoryFn = @ptrCast(try findOriginalSyscall(@ptrCast(nt_protect_virtual_memory)));
 
-    std.debug.print("press any key to use VirtualAlloc...\n", .{});
+    try unhook(@ptrCast(nt_allocate_virtual_memory), NtProtectVirtualMemory);
+
+    std.debug.print("[!] NtAllocateVirtualMemory unhooked!\n", .{});
+    std.debug.print("[!] press any key to call NtAllocateVirtualMemory...\n", .{});
     _ = try std.io.getStdIn().reader().readByte();
 
     const base_address = try win.VirtualAlloc(
@@ -34,29 +39,43 @@ pub fn main() !void {
     );
 }
 
-fn unhook(addr: [*]u8) !void {
-    const unhooked_bytes = try findOriginalSyscallBytes(addr);
+fn unhook(addr: [*]u8, NtProtectVirtualMemory: NtProtectVirtualMemoryFn) !void {
+    const process_handle = win.GetCurrentProcess();
 
+    const original_syscall = try findOriginalSyscall(addr);
+    const unhooked_bytes = generateJumpBytes(@intFromPtr(addr), @intFromPtr(original_syscall));
+
+    var region_size: usize = 20;
     var old_protect: u32 = undefined;
 
-    try VirtualProtect(
-        @ptrCast(addr),
-        20,
+    var result = NtProtectVirtualMemory(
+        process_handle,
+        @constCast(@ptrCast(&addr)),
+        &region_size,
         win.PAGE_EXECUTE_READWRITE,
         &old_protect,
     );
 
+    if (result != .SUCCESS) {
+        return error.NtProtectVirtualMemoryFailed;
+    }
+
     @memcpy(addr, &unhooked_bytes);
 
-    try VirtualProtect(
-        @ptrCast(addr),
-        20,
+    result = NtProtectVirtualMemory(
+        process_handle,
+        @constCast(@ptrCast(&addr)),
+        &region_size,
         old_protect,
         &old_protect,
     );
+
+    if (result != .SUCCESS) {
+        return error.NtProtectVirtualMemoryFailed;
+    }
 }
 
-fn findOriginalSyscallBytes(addr: [*]const u8) ![5]u8 {
+fn findOriginalSyscall(addr: [*]const u8) ![*]const u8 {
     const proc = try resolveJmpTarget(try resolveJmpTarget(addr));
 
     var handle: c.csh = undefined;
@@ -73,7 +92,7 @@ fn findOriginalSyscallBytes(addr: [*]const u8) ![5]u8 {
     const count = c.cs_disasm(
         handle,
         proc,
-        1000,
+        2000,
         @intFromPtr(proc),
         0,
         &instructions,
@@ -101,7 +120,7 @@ fn findOriginalSyscallBytes(addr: [*]const u8) ![5]u8 {
                         const syscall_pattern_detected = try detectSyscallPattern(@ptrFromInt(source_value));
 
                         if (syscall_pattern_detected) {
-                            return generateJumpBytes(@intFromPtr(addr), source_value);
+                            return @ptrFromInt(source_value);
                         }
                     }
                 }
